@@ -31,6 +31,7 @@ export default defineConfig({
   test: {
     ...sharedTestOptions,
     env: {
+      ...sharedTestOptions.env,
       BACKUP_ALLOW_LOCAL_DESTINATION: "true",
       BACKUP_LOCAL_ROOT: tmpdir(),
     },
