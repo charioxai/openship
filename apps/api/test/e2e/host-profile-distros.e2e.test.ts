@@ -96,7 +96,9 @@ const CASES: readonly Case[] = [
     libc: "glibc",
     versionPrefix: "2",
     installGit: ["yum install -y git"],
-    dockerEngine: ["amazon-linux-extras install -y docker"],
+    dockerEngine: [
+      "{ amazon-linux-extras install -y docker || command -v docker >/dev/null 2>&1; }",
+    ],
     composeFrom: "plugin",
   },
   {

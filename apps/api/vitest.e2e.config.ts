@@ -1,4 +1,5 @@
 import { configDefaults, defineConfig } from "vitest/config";
+import { tmpdir } from "node:os";
 import { sharedTestOptions, testAlias } from "./vitest.config";
 
 /**
@@ -29,6 +30,10 @@ export default defineConfig({
   },
   test: {
     ...sharedTestOptions,
+    env: {
+      BACKUP_ALLOW_LOCAL_DESTINATION: "true",
+      BACKUP_LOCAL_ROOT: tmpdir(),
+    },
     include,
     exclude: [...configDefaults.exclude, ...(scope === "fast" ? [HEAVY] : [])],
     // Pulling and building images and streaming volumes all happen in
