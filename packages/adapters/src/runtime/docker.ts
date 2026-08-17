@@ -172,6 +172,143 @@ const RESTART_POLICIES: Record<string, { Name: string; MaximumRetryCount: number
 
 const DOCKER_BUILD_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
+const CHARIOX_RUNTIME_PROFILE_KEY = "CHARIOX_OPENSHIP_RUNTIME_PROFILE";
+const CHARIOX_RUNTIME_NETWORK_KEY = "CHARIOX_OPENSHIP_NETWORK_MODE";
+const CHARIOX_RUNTIME_CONTAINER_KEY = "CHARIOX_OPENSHIP_CONTAINER_NAME";
+const CHARIOX_RUNTIME_BINDS_KEY = "CHARIOX_OPENSHIP_READ_ONLY_BINDS_JSON";
+const CHARIOX_STRICT_PUBLICATION_PROFILE = "strict-publication-v1";
+
+interface CharioxRuntimeControls {
+  environment: Record<string, string>;
+  containerName?: string;
+  networkMode?: string;
+  readOnlyBinds: string[];
+  strictPublication: boolean;
+}
+
+function charioxReadOnlyBinds(value: string | undefined): string[] {
+  if (!value) return [];
+  if (value.length > 16_384) throw new Error("Invalid Chariox publication bind controls");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("Invalid Chariox publication bind controls");
+  }
+  if (!Array.isArray(parsed) || parsed.length > 18) {
+    throw new Error("Invalid Chariox publication bind controls");
+  }
+  const binds: string[] = [];
+  const targets = new Set<string>();
+  for (const value of parsed) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("Invalid Chariox publication bind controls");
+    }
+    const { source, target } = value as Record<string, unknown>;
+    if (typeof source !== "string" || typeof target !== "string") {
+      throw new Error("Invalid Chariox publication bind controls");
+    }
+    const allowedSource = (
+      /^\/var\/lib\/chariox\/credentials\/profiles\/[A-Za-z0-9_.-]{1,120}$/.test(source)
+      || /^\/var\/lib\/chariox\/publications\/\.(?:caller-claims-configs|audit-capabilities)\/[A-Za-z0-9_.-]{1,120}\.(?:json|url)$/.test(source)
+    );
+    const allowedTarget = (
+      target === "/home/chariox/.provider-credentials"
+      || /^\/home\/chariox\/\.credential-bindings\/[0-9]{3}$/.test(target)
+      || target === "/run/chariox-publication-bootstrap/caller-claims.json"
+      || target === "/run/chariox-publication-bootstrap/audit-url"
+    );
+    if (!allowedSource || !allowedTarget || targets.has(target)) {
+      throw new Error("Invalid Chariox publication bind controls");
+    }
+    targets.add(target);
+    binds.push(`${source}:${target}:ro`);
+  }
+  return binds;
+}
+
+/**
+ * Narrow internal extension used by Chariox's server-side deployment adapter.
+ * The control keys never enter the tenant container. A network override is
+ * accepted only for a Chariox-owned internal egress network and only together
+ * with the exact strict profile, so ordinary OpenShip projects cannot use this
+ * path to join arbitrary daemon networks.
+ */
+export function consumeCharioxRuntimeControls(
+  environment: Record<string, string>,
+): CharioxRuntimeControls {
+  const profile = environment[CHARIOX_RUNTIME_PROFILE_KEY];
+  const networkMode = environment[CHARIOX_RUNTIME_NETWORK_KEY];
+  const containerName = environment[CHARIOX_RUNTIME_CONTAINER_KEY];
+  const readOnlyBindsJson = environment[CHARIOX_RUNTIME_BINDS_KEY];
+  const cleanEnvironment = Object.fromEntries(
+    Object.entries(environment).filter(([key]) => (
+      key !== CHARIOX_RUNTIME_PROFILE_KEY
+      && key !== CHARIOX_RUNTIME_NETWORK_KEY
+      && key !== CHARIOX_RUNTIME_CONTAINER_KEY
+      && key !== CHARIOX_RUNTIME_BINDS_KEY
+    )),
+  );
+  if (!profile && !networkMode && !containerName && !readOnlyBindsJson) {
+    return { environment: cleanEnvironment, readOnlyBinds: [], strictPublication: false };
+  }
+  if (profile !== CHARIOX_STRICT_PUBLICATION_PROFILE) {
+    throw new Error("Unsupported Chariox runtime profile");
+  }
+  if (!networkMode || !/^chariox-pub-egress-[A-Za-z0-9_.-]{1,50}-n$/.test(networkMode)) {
+    throw new Error("Invalid Chariox publication egress network");
+  }
+  if (!containerName || !/^chariox-publication-[A-Za-z0-9_.-]{1,44}$/.test(containerName)) {
+    throw new Error("Invalid Chariox publication container name");
+  }
+  return {
+    environment: cleanEnvironment,
+    containerName,
+    networkMode,
+    readOnlyBinds: charioxReadOnlyBinds(readOnlyBindsJson),
+    strictPublication: true,
+  };
+}
+
+export function strictPublicationHostConfig(): Dockerode.HostConfig {
+  return {
+    Init: true,
+    ReadonlyRootfs: true,
+    SecurityOpt: ["no-new-privileges"],
+    CapDrop: ["ALL"],
+    CapAdd: ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER", "KILL"],
+    PidsLimit: 256,
+    Ulimits: [{ Name: "nofile", Soft: 4096, Hard: 4096 }],
+    Sysctls: {
+      "net.ipv6.conf.all.disable_ipv6": "1",
+      "net.ipv6.conf.default.disable_ipv6": "1",
+    },
+    Tmpfs: {
+      "/workspace": "rw,nosuid,nodev,size=357913941,uid=1001,gid=1001,mode=0770",
+      "/tmp": "rw,nosuid,nodev,size=178956971,uid=0,gid=0,mode=1777",
+      "/home/chariox": "rw,nosuid,nodev,size=134217728,uid=1001,gid=1001,mode=0700",
+      "/home/chariox-action": "rw,nosuid,nodev,size=33554432,uid=1002,gid=1002,mode=0700",
+      "/home/chariox-gateway": "rw,nosuid,nodev,size=33554432,uid=1003,gid=1003,mode=0700",
+      "/home/chariox/.chariox": "rw,nosuid,nodev,size=134217728,uid=1001,gid=1001,mode=0700",
+      "/run/chariox-provider-cache": "rw,nosuid,nodev,size=134217728,uid=1001,gid=1001,mode=0700",
+      "/run/chariox-publication-capabilities": "rw,nosuid,nodev,noexec,size=65536,uid=0,gid=0,mode=0711",
+    },
+  };
+}
+
+export function deploymentPortBindings(
+  port: number,
+  hostPort: number | undefined,
+  strictPublication: boolean,
+): Dockerode.PortMap {
+  if (strictPublication) return {};
+  return {
+    [`${port}/tcp`]: [
+      { HostIp: "127.0.0.1", HostPort: hostPort ? String(hostPort) : "" },
+    ],
+  };
+}
+
 /**
  * A deployment build and its cancellation request may resolve separate
  * DockerRuntime instances — the cancel endpoint takes `platform().runtime`, not
@@ -2502,14 +2639,16 @@ export class DockerRuntime implements RuntimeAdapter {
       throw new Error("Docker deploy requires an imageRef (built image tag)");
     }
 
-    const containerName = `openship-${config.runtimeName || config.projectId}-${config.deploymentId}`;
+    const charioxRuntime = consumeCharioxRuntimeControls(config.envVars);
+    const containerName = charioxRuntime.containerName
+      ?? `openship-${config.runtimeName || config.projectId}-${config.deploymentId}`;
 
     // Environment variables. A worker (config.portless) listens on nothing, so
     // injecting PORT would be a lie the app might bind to — omit it there (#538-B).
     const env = [
       ...(config.portless ? [] : [`PORT=${config.port}`]),
       `NODE_ENV=${config.environment === "production" ? "production" : "development"}`,
-      ...Object.entries(config.envVars).map(([k, v]) => `${k}=${v}`),
+      ...Object.entries(charioxRuntime.environment).map(([k, v]) => `${k}=${v}`),
     ];
 
     // Start command - if provided, split into Cmd array
@@ -2530,6 +2669,9 @@ export class DockerRuntime implements RuntimeAdapter {
       true,
     );
     const binds = scopedBinds.length > 0 ? scopedBinds : undefined;
+    const runtimeBinds: string[] = charioxRuntime.strictPublication
+      ? [...(binds ?? []), ...charioxRuntime.readOnlyBinds]
+      : (binds ?? []);
 
     log({
       timestamp: new Date().toISOString(),
@@ -2560,9 +2702,11 @@ export class DockerRuntime implements RuntimeAdapter {
     // consumer; loopback-only publishing below is untouched. Best-effort — a
     // network failure must not fail the deploy (the app still works via the edge).
     const aliasSlug = config.slug || config.runtimeName || config.projectId;
-    let networkId: string | undefined;
+    let networkId: string | undefined = charioxRuntime.networkMode;
     let aliases: string[] = [];
-    if (config.networkAlias) {
+    if (networkId && config.networkAlias) {
+      aliases = buildNetworkAliases(config.networkAlias, config.extraAliases);
+    } else if (config.networkAlias) {
       aliases = buildNetworkAliases(config.networkAlias, config.extraAliases);
       try {
         // ensureNetwork returns the network ID; the compose/service path also keys
@@ -2603,7 +2747,8 @@ export class DockerRuntime implements RuntimeAdapter {
         : {}),
       HostConfig: {
         RestartPolicy: restartPolicy,
-        Binds: binds,
+        Binds: runtimeBinds.length > 0 ? runtimeBinds : undefined,
+        ...(charioxRuntime.strictPublication ? strictPublicationHostConfig() : {}),
         // Join the project's own bridge network as the primary network (mirrors
         // the compose path's NetworkMode: group.id). Egress + loopback publish are
         // unaffected; this only gives the container an in-network DNS identity.
@@ -2621,11 +2766,9 @@ export class DockerRuntime implements RuntimeAdapter {
         ...(config.portless
           ? {}
           : {
-              PortBindings: {
-                [`${config.port}/tcp`]: [
-                  { HostIp: "127.0.0.1", HostPort: config.hostPort ? String(config.hostPort) : "" },
-                ],
-              },
+              PortBindings: deploymentPortBindings(
+                config.port, config.hostPort, charioxRuntime.strictPublication,
+              ),
             }),
       },
     });

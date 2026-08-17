@@ -1253,11 +1253,30 @@ export async function ensureProject(
     await persistMonorepoApps(project.id, data);
   }
 
+  // A folder can be rescanned after its repository shape changes. The incoming
+  // projectType is authoritative for that explicit transition: remove only the
+  // now-obsolete service kind before syncing the new one. Keeping both kinds
+  // makes the services pipeline attempt to deploy stale monorepo rows.
+  const staleKind = staleServiceKindForProjectType(data.projectType);
+  if (staleKind === "monorepo") {
+    await repos.service.syncMonorepoApps(project.id, []);
+  } else if (staleKind === "compose") {
+    await repos.service.syncFromCompose(project.id, []);
+  }
+
   // Compose services, for BOTH branches (createProductionProject handles the
   // monorepo shape internally; this one shape is persisted in one place).
   await persistComposeServices(project.id, organizationId, data);
 
   return { success: true, project_id: project.id, created };
+}
+
+export function staleServiceKindForProjectType(
+  projectType: EnsureProjectBody["projectType"],
+): "compose" | "monorepo" | null {
+  if (projectType === "services") return "monorepo";
+  if (projectType === "monorepo") return "compose";
+  return null;
 }
 
 // ─── List projects ───────────────────────────────────────────────────────────
