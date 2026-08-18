@@ -4,6 +4,7 @@ import type { TSchema } from "@sinclair/typebox";
 import { getRouteRegistry, isPublicSpec } from "../../src/lib/route-permission";
 import { AddDomainBody } from "../../src/modules/domains/domain.schema";
 import { TriggerDeployBody, BuildAccessBody } from "../../src/modules/deployments/deployment.schema";
+import { staleServiceKindForProjectShape } from "../../src/modules/projects/project-crud.service";
 
 /**
  * `collectionProject: true` tells `requirePermission` to SKIP the collection
@@ -87,5 +88,46 @@ describe("collectionProject: the flag's safety precondition", () => {
 
     expect(Value.Check(AddDomainBody, { projectId: "p1", hostname: "app.example.com" })).toBe(true);
     expect(Value.Check(AddDomainBody, { hostname: "app.example.com" })).toBe(false);
+  });
+});
+
+describe("create-scoped folder staging routes", () => {
+  it("removes only the stale service kind during an explicit project-shape transition", () => {
+    expect(staleServiceKindForProjectShape({ projectType: "services", services: [{ name: "api" }] })).toBe("monorepo");
+    expect(staleServiceKindForProjectShape({ projectType: "monorepo", monorepoApps: [{ name: "web", rootDirectory: "apps/web" }] })).toBe("compose");
+    expect(staleServiceKindForProjectShape({ projectType: "services", services: [] })).toBeNull();
+    expect(staleServiceKindForProjectShape({ projectType: "app" })).toBeNull();
+  });
+
+  it("allows only isolated upload steps before project creation", async () => {
+    await import("../../src/modules/projects/project.routes");
+
+    const flagged = getRouteRegistry()
+      .filter((route) => (
+        route.module === "projects"
+        && !isPublicSpec(route.spec)
+        && route.spec.projectCreate === true
+      ))
+      .map((route) => `${route.method} ${route.path}`);
+
+    expect(new Set(flagged)).toEqual(new Set([
+      "POST /api/projects/folder/session",
+      "POST /api/projects/folder/scan/:sessionId",
+      "POST /api/projects/folder/upload/:sessionId",
+      "POST /api/projects/",
+    ]));
+    expect(flagged).not.toContain("POST /api/projects/ensure");
+
+    const stage = getRouteRegistry().find((route) => (
+      route.module === "projects"
+      && route.method === "PATCH"
+      && route.path === "/api/projects/:id/stage-folder"
+    ));
+    expect(stage).toBeDefined();
+    expect(isPublicSpec(stage!.spec)).toBe(false);
+    if (!isPublicSpec(stage!.spec)) {
+      expect(stage!.spec.collection).not.toBe(true);
+      expect(stage!.spec.projectCreate).not.toBe(true);
+    }
   });
 });

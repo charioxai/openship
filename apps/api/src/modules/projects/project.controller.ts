@@ -115,8 +115,21 @@ function logEnsureProjectError(
 // ─── Ensure project ──────────────────────────────────────────────────────────
 
 export async function ensure(c: Context) {
-  const ctx = getRequestContext(c);
   const body = await c.req.json<TEnsureProjectBody>();
+  return ensureFromBody(c, body);
+}
+
+export async function stageFolder(c: Context) {
+  const id = param(c, "id");
+  const body = await c.req.json<TEnsureProjectBody>();
+  if (body.projectId && body.projectId !== id) {
+    return c.json({ success: false, error: "projectId must match the route project" }, 400);
+  }
+  return ensureFromBody(c, { ...body, projectId: id });
+}
+
+async function ensureFromBody(c: Context, body: TEnsureProjectBody) {
+  const ctx = getRequestContext(c);
 
   if (!body.name) {
     return c.json({ success: false, error: "name is required" }, 400);

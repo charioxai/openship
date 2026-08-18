@@ -97,6 +97,9 @@ r.post(
   {
     tag: "project:write",
     collection: true,
+    // A create-scoped PAT needs an isolated staging session before its project
+    // exists. The opaque session is still bound to the authenticated org.
+    projectCreate: true,
     body: FolderSessionBody,
     mcp: {
       description:
@@ -110,6 +113,7 @@ r.post(
   {
     tag: "project:write",
     collection: true,
+    projectCreate: true,
     mcp: {
       description:
         "Folder-upload deploy — STEP 2/4. Run AFTER the tarball is uploaded. Detects the uploaded source's framework/build config (stack, packageManager, install/build/start commands, outputDirectory, productionPaths, port) and, for a docker-compose folder, the `services` array. Body may be empty ({}). Feed the result into projects/ensure (STEP 3) — including `services` verbatim when present.",
@@ -130,7 +134,12 @@ r.post(
 // 404s this in CLOUD_MODE; the 300MB bodyLimit only runs once localOnly passes.
 r.post(
   "/folder/upload/:sessionId",
-  { tag: "project:write", collection: true, localOnly: true },
+  {
+    tag: "project:write",
+    collection: true,
+    projectCreate: true,
+    localOnly: true,
+  },
   bodyLimit({
     maxSize: 300_000_000,
     onError: (c) => c.json({ error: "Upload exceeds the 300MB limit.", code: "PAYLOAD_TOO_LARGE" }, 413),
@@ -176,6 +185,19 @@ r.post(
 );
 
 /* ─── Projects CRUD ────────────────────────────────────────────────────── */
+r.patch(
+  "/:id/stage-folder",
+  {
+    tag: "project:write",
+    body: EnsureProjectBody,
+    mcp: {
+      description:
+        "Stage a folder scan on this exact project after create-only access has auto-granted its id. Restores masked compose environment values from uploadSessionId before deployment.",
+    },
+  },
+  cloudProjectProxy,
+  ctrl.stageFolder,
+);
 r.get(
   "/:id",
   { tag: "project:read", mcp: { description: "Get a project by id — config, source, routes, status." } },

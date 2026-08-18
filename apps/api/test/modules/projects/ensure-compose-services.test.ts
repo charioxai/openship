@@ -136,6 +136,7 @@ describe("ensureProject compose services", () => {
     );
 
     expect(result.created).toBe(false);
+    expect(serviceRepo.syncMonorepoApps).toHaveBeenCalledWith("proj_1", []);
     expect(serviceRepo.syncFromCompose).toHaveBeenCalledWith("proj_1", scannedServices);
   });
 
@@ -149,11 +150,12 @@ describe("ensureProject compose services", () => {
     projectRepo.findById.mockResolvedValue(existingProject);
 
     await ensureProject(
-      { projectId: "proj_1", name: "my-stack", services: [] } as any,
+      { projectId: "proj_1", name: "my-stack", projectType: "services", services: [] } as any,
       "org_1",
     );
 
     expect(serviceRepo.syncFromCompose).not.toHaveBeenCalled();
+    expect(serviceRepo.syncMonorepoApps).not.toHaveBeenCalled();
   });
 });
 
