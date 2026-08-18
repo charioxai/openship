@@ -91,6 +91,11 @@ const envSchema = z.object({
    */
   OPENSHIP_REQUIRE_AUTH: envBool("false"),
 
+  /** Chariox's private co-located execution capability. Both values are absent
+   * on normal OpenShip installations and must be provisioned as a pair. */
+  OPENSHIP_CHARIOX_COLOCATION_SECRET: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  OPENSHIP_CHARIOX_INSTANCE_ID: z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,127}$/).optional(),
+
   /**
    * The instance's auth mode, DECLARED by whoever launches the API. When set it is
    * the ONLY source — `getAuthMode()` returns it without reading the DB, without a
@@ -446,6 +451,15 @@ const envSchema = z.object({
     .max(8 * 1024 * 1024)
     .default(512 * 1024),
 }).superRefine((cfg, ctx) => {
+  if (!!cfg.OPENSHIP_CHARIOX_COLOCATION_SECRET !== !!cfg.OPENSHIP_CHARIOX_INSTANCE_ID) {
+    ctx.addIssue({
+      code: "custom",
+      path: [cfg.OPENSHIP_CHARIOX_COLOCATION_SECRET
+        ? "OPENSHIP_CHARIOX_INSTANCE_ID"
+        : "OPENSHIP_CHARIOX_COLOCATION_SECRET"],
+      message: "OPENSHIP_CHARIOX_COLOCATION_SECRET and OPENSHIP_CHARIOX_INSTANCE_ID must be set together",
+    });
+  }
   // Fail ACME misconfiguration HERE, at boot, with the variable named — not at
   // the first deploy, where NginxProvider's constructor re-checks the same rules
   // (that check stays: the adapter also serves non-env callers). Empty/whitespace

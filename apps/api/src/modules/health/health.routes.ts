@@ -9,6 +9,7 @@ import { APP_VERSION } from "../../lib/app-version";
 import { getAuthMode } from "../../lib/auth-mode";
 import { resolveProductMode } from "../../lib/product-mode";
 import { resolveHostControlEnabled } from "../../lib/host-control";
+import { createCharioxColocationAttestation } from "./chariox-colocation";
 
 /** Running server version (apps/api/package.json, via lib/app-version — the same
  *  value sent to the cloud on every call). Lets the dashboard tell a self-hosted
@@ -127,4 +128,17 @@ healthRoutes.get("/env", rateLimiterFor("default-anon"), async (c) => {
     ...(machineName && { machineName }),
     ...(env.HOST_DOMAIN && { hostDomain: env.HOST_DOMAIN }),
   });
+});
+
+healthRoutes.post("/chariox-co-location", rateLimiterFor("default-anon"), (c) => {
+  if (!env.OPENSHIP_CHARIOX_COLOCATION_SECRET || !env.OPENSHIP_CHARIOX_INSTANCE_ID) {
+    return c.notFound();
+  }
+  const attestation = createCharioxColocationAttestation({
+    secret: env.OPENSHIP_CHARIOX_COLOCATION_SECRET,
+    instanceId: env.OPENSHIP_CHARIOX_INSTANCE_ID,
+    requestedInstanceId: c.req.header("x-chariox-colocation-instance-id"),
+    nonce: c.req.header("x-chariox-colocation-nonce"),
+  });
+  return attestation ? c.json(attestation) : c.json({ error: "forbidden" }, 403);
 });
