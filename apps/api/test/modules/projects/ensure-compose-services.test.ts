@@ -55,7 +55,7 @@ vi.mock("../../../src/modules/domains/project-route.service", () => ({
   persistProjectRouteState: vi.fn(),
   reapplyProjectLiveRoutes: vi.fn(),
   resolveProjectRouteState: vi.fn(),
-  syncProjectRouteState: vi.fn(),
+  syncProjectRouteState: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("../../../src/modules/domains/routing-apply.service", () => ({
@@ -198,6 +198,51 @@ describe("ensureProject compose services", () => {
     const monorepo = ensureProject(
       {
         projectId: "proj_1",
+        name: "my-stack",
+        projectType: "monorepo",
+        monorepoApps: [{ name: "web", rootDirectory: "apps/web" }],
+      } as any,
+      "org_1",
+    );
+    expect(serviceRepo.listByProjectKind).toHaveBeenCalledTimes(1);
+
+    releaseCompose();
+    await compose;
+    await expect(monorepo).rejects.toThrow("create a new project to preserve deployment history");
+    expect(serviceRepo.syncMonorepoApps).not.toHaveBeenCalled();
+  });
+
+  it("locks the name-derived project when an explicit different slug is supplied", async () => {
+    projectRepo.findBySlugInOrg.mockImplementation(async (_organizationId: string, slug: string) =>
+      slug === "my-stack" ? existingProject : null,
+    );
+    const kinds: Array<"compose" | "monorepo"> = [];
+    serviceRepo.listByProjectKind.mockImplementation(
+      async (_projectId: string, kind: "compose" | "monorepo") =>
+        kinds.includes(kind) ? [{ id: `svc_${kind}`, kind }] : [],
+    );
+    let releaseCompose!: () => void;
+    const composeBlocked = new Promise<void>((resolve) => {
+      releaseCompose = resolve;
+    });
+    serviceRepo.syncFromCompose.mockImplementation(async () => {
+      await composeBlocked;
+      kinds.push("compose");
+    });
+
+    const compose = ensureProject(
+      {
+        name: "my-stack",
+        slug: "renamed-stack",
+        projectType: "services",
+        services: scannedServices,
+      } as any,
+      "org_1",
+    );
+    await vi.waitFor(() => expect(serviceRepo.syncFromCompose).toHaveBeenCalledTimes(1));
+
+    const monorepo = ensureProject(
+      {
         name: "my-stack",
         projectType: "monorepo",
         monorepoApps: [{ name: "web", rootDirectory: "apps/web" }],

@@ -1149,7 +1149,8 @@ export async function ensureProject(
   organizationId: string,
   authority?: { principalId: string },
 ) {
-  const desiredSlug = data.slug || slugify(data.name);
+  const nameSlug = slugify(data.name);
+  const desiredSlug = data.slug || nameSlug;
   const lockKeys = new Set<string>();
   if (data.projectId) {
     lockKeys.add(`project-shape:id:${data.projectId}`);
@@ -1158,6 +1159,10 @@ export async function ensureProject(
       lockKeys.add(`project-shape:slug:${organizationId}:${current.slug}`);
     }
   }
+  // ensureProjectUnlocked resolves by the name-derived slug before consulting
+  // an explicit, different slug. Lock every identity that resolver can select,
+  // otherwise two callers can mutate the same project under disjoint locks.
+  lockKeys.add(`project-shape:slug:${organizationId}:${nameSlug}`);
   lockKeys.add(`project-shape:slug:${organizationId}:${desiredSlug}`);
 
   const keys = [...lockKeys].sort();
