@@ -69,7 +69,8 @@ describe("Chariox strict publication runtime controls", () => {
   });
 
   it("disables IPv6 and direct host port routes for strict publications", () => {
-    expect(strictPublicationHostConfig()).toMatchObject({
+    expect(strictPublicationHostConfig({ memoryMb: 2048, cpuCores: 2 })).toMatchObject({
+      MemorySwap: 2 * 1024 * 1024 * 1024,
       Sysctls: {
         "net.ipv6.conf.all.disable_ipv6": "1",
         "net.ipv6.conf.default.disable_ipv6": "1",

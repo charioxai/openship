@@ -270,7 +270,10 @@ export function consumeCharioxRuntimeControls(
   };
 }
 
-export function strictPublicationHostConfig(): Dockerode.HostConfig {
+export function strictPublicationHostConfig(
+  resources?: Parameters<typeof dockerResourceLimits>[0],
+): Dockerode.HostConfig {
+  const limits = dockerResourceLimits(resources);
   return {
     Init: true,
     ReadonlyRootfs: true,
@@ -278,6 +281,7 @@ export function strictPublicationHostConfig(): Dockerode.HostConfig {
     CapDrop: ["ALL"],
     CapAdd: ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER", "KILL"],
     PidsLimit: 256,
+    ...(limits.Memory ? { MemorySwap: limits.Memory } : {}),
     Ulimits: [{ Name: "nofile", Soft: 4096, Hard: 4096 }],
     Sysctls: {
       "net.ipv6.conf.all.disable_ipv6": "1",
@@ -2748,7 +2752,7 @@ export class DockerRuntime implements RuntimeAdapter {
       HostConfig: {
         RestartPolicy: restartPolicy,
         Binds: runtimeBinds.length > 0 ? runtimeBinds : undefined,
-        ...(charioxRuntime.strictPublication ? strictPublicationHostConfig() : {}),
+        ...(charioxRuntime.strictPublication ? strictPublicationHostConfig(config.resources) : {}),
         // Join the project's own bridge network as the primary network (mirrors
         // the compose path's NetworkMode: group.id). Egress + loopback publish are
         // unaffected; this only gives the container an in-network DNS identity.
