@@ -46,6 +46,7 @@ vi.mock("@repo/db", () => ({
   schema: {},
   eq: vi.fn(),
   getDriver: () => "postgres",
+  withAdvisoryLock: (_key: string, fn: () => Promise<unknown>) => fn(),
 }));
 
 vi.mock("../../../src/modules/domains/project-route.service", () => ({
@@ -165,6 +166,50 @@ describe("ensureProject compose services", () => {
     expect(projectRepo.update).not.toHaveBeenCalled();
     expect(serviceRepo.syncMonorepoApps).not.toHaveBeenCalled();
     expect(serviceRepo.syncFromCompose).not.toHaveBeenCalled();
+  });
+
+  it("serializes concurrent first-stage requests for opposite service shapes", async () => {
+    projectRepo.findById.mockResolvedValue(existingProject);
+    const kinds: Array<"compose" | "monorepo"> = [];
+    serviceRepo.listByProjectKind.mockImplementation(
+      async (_projectId: string, kind: "compose" | "monorepo") =>
+        kinds.includes(kind) ? [{ id: `svc_${kind}`, kind }] : [],
+    );
+    let releaseCompose!: () => void;
+    const composeBlocked = new Promise<void>((resolve) => {
+      releaseCompose = resolve;
+    });
+    serviceRepo.syncFromCompose.mockImplementation(async () => {
+      await composeBlocked;
+      kinds.push("compose");
+    });
+
+    const compose = ensureProject(
+      {
+        projectId: "proj_1",
+        name: "my-stack",
+        projectType: "services",
+        services: scannedServices,
+      } as any,
+      "org_1",
+    );
+    await vi.waitFor(() => expect(serviceRepo.syncFromCompose).toHaveBeenCalledTimes(1));
+
+    const monorepo = ensureProject(
+      {
+        projectId: "proj_1",
+        name: "my-stack",
+        projectType: "monorepo",
+        monorepoApps: [{ name: "web", rootDirectory: "apps/web" }],
+      } as any,
+      "org_1",
+    );
+    expect(serviceRepo.listByProjectKind).toHaveBeenCalledTimes(1);
+
+    releaseCompose();
+    await compose;
+    await expect(monorepo).rejects.toThrow("create a new project to preserve deployment history");
+    expect(serviceRepo.syncMonorepoApps).not.toHaveBeenCalled();
   });
 
   it("leaves the service table alone when the request carries no services", async () => {

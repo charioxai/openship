@@ -36,6 +36,8 @@ export interface FolderSession {
   /** Self-hosted (api-relay): staging dir on this host + single-use upload ticket. */
   stagingDir?: string;
   uploadTicket?: string;
+  /** Self-hosted relay lifecycle; the synchronous transition to uploading is the replay lock. */
+  uploadState?: "waiting" | "uploading" | "uploaded";
   /** True once bytes have landed (api-relay: after upload; oblien-direct: assumed). */
   uploaded: boolean;
   /** Detected/typed name hint for the project. */

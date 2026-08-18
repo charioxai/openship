@@ -19,7 +19,7 @@
 
 import { randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, rename, rm, stat } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -224,6 +224,7 @@ export async function createFolderSession(
     expiresAt,
     stagingDir,
     uploadTicket,
+    uploadState: "waiting",
     uploaded: false,
     name: input.name,
   });
@@ -259,18 +260,57 @@ export async function acceptRelayUpload(
   if (session.mode !== "api-relay" || !session.stagingDir) {
     throw new Error("Session does not accept relay uploads");
   }
+  if (session.uploaded || session.uploadState === "uploaded") {
+    throw new FolderUploadStateError("Upload ticket has already been consumed");
+  }
+  if (session.uploadState === "uploading") {
+    throw new FolderUploadStateError("Upload is already in progress");
+  }
+  // Synchronous, before the first await: concurrent requests cannot both pass.
+  session.uploadState = "uploading";
 
-  const archivePath = join(session.stagingDir, "__upload.tar.gz");
-  await streamToFile(body, archivePath);
+  const stagingDir = session.stagingDir;
+  const previousDir = `${stagingDir}.previous-${randomBytes(8).toString("hex")}`;
+  let incomingDir = "";
+  let previousMoved = false;
+  let published = false;
 
   try {
-    await safeExtractTarGz(archivePath, session.stagingDir);
-  } finally {
-    await rm(archivePath, { force: true }).catch(() => {});
-  }
+    incomingDir = await mkdtemp(`${stagingDir}.incoming-`);
+    const archivePath = join(incomingDir, "__upload.tar.gz");
+    await streamToFile(body, archivePath);
+    await safeExtractTarGz(archivePath, incomingDir);
+    await rm(archivePath, { force: true });
+    await rename(stagingDir, previousDir);
+    previousMoved = true;
+    try {
+      await rename(incomingDir, stagingDir);
+      published = true;
+    } catch (err) {
+      await rename(previousDir, stagingDir);
+      previousMoved = false;
+      throw err;
+    }
 
-  session.uploaded = true;
+    session.uploaded = true;
+    session.uploadState = "uploaded";
+    session.uploadTicket = undefined;
+    await rm(previousDir, { recursive: true, force: true }).catch(() => {});
+    previousMoved = false;
+  } finally {
+    if (!published) {
+      session.uploadState = "waiting";
+      if (previousMoved) {
+        await rename(previousDir, stagingDir).catch(() => {});
+      }
+      if (incomingDir) {
+        await rm(incomingDir, { recursive: true, force: true }).catch(() => {});
+      }
+    }
+  }
 }
+
+export class FolderUploadStateError extends Error {}
 
 /**
  * Extract a tar.gz into `destDir`, defended against path traversal (Zip-Slip).
@@ -340,6 +380,9 @@ async function scanSource(session: FolderSession) {
   }
 
   if (!session.stagingDir) throw new Error("Session has no staging directory");
+  if (!session.uploaded || session.uploadState === "uploading") {
+    throw new Error("Uploaded source not found");
+  }
   const st = await stat(session.stagingDir).catch(() => null);
   if (!st?.isDirectory()) throw new Error("Uploaded source not found");
   const { resolveFromLocal } = await import("../../deployments/local-source");

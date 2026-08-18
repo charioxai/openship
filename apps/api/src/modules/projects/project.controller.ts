@@ -416,7 +416,11 @@ export async function create(c: Context) {
     const routeDefault = await getRouteStrategy(userId).catch(() => "auto" as const);
     if (routeDefault !== "auto") body.routeStrategy = routeDefault;
   }
-  const project = await projectService.createProject(body, organizationId);
+  const project = await projectService.createProject(
+    body,
+    organizationId,
+    ctx.tokenScope?.tokenId,
+  );
   audit.recordAsync(auditContextFrom(c, organizationId, userId), {
     eventType: "project.created",
     resourceType: "project",
@@ -431,16 +435,8 @@ export async function create(c: Context) {
       gitBranch: project.gitBranch ?? null,
     },
   });
-  // A scoped token that just created a project now fully controls it: record a
-  // per-project grant so later reads/writes/deletes on this id pass the
-  // restricted-principal check. Only a token carrying a project `create` grant
-  // can reach this route (see permission.ts), so this is exactly the "projects
-  // it creates" scope accruing ownership. No-op for sessions or full tokens.
-  if (ctx.tokenScope) {
-    await repos.patGrant.createMany(ctx.tokenScope.tokenId, [
-      { resourceType: "project", resourceId: project.id, permissions: ["read", "write", "admin"] },
-    ]);
-  }
+  // Scoped creation writes the project and its exact project authority in one
+  // DB transaction inside createProject; a lost grant can never strand a row.
   return c.json({ data: project }, 201);
 }
 

@@ -1,7 +1,14 @@
 import { eq, and, isNull, isNotNull, inArray, desc, sql, type SQL } from "drizzle-orm";
 import { generateId } from "@repo/core";
 import type { Database } from "../client";
-import { project, projectGroup, envVar, deployment, service } from "../schema";
+import {
+  project,
+  projectGroup,
+  envVar,
+  deployment,
+  service,
+  personalAccessTokenGrant,
+} from "../schema";
 import { member } from "../schema/organization";
 // Cloning a project writes its group and service rows in the same transaction, so this repo
 // needs both insert types. Imported from their own repos (where they are already declared)
@@ -310,6 +317,30 @@ export function createProjectRepo(db: Database) {
       const id = providedId ?? generateId("proj");
       const row = { id, ...rest };
       await db.insert(project).values(row);
+      return { ...row, createdAt: new Date(), updatedAt: new Date() } as Project;
+    },
+
+    /**
+     * Create a project and the scoped PAT authority that makes it usable in one
+     * transaction. The folder workflow returns the project id only after this
+     * commits, so a grant failure cannot strand an inaccessible project.
+     */
+    async createWithScopedPatGrant(
+      data: Omit<NewProject, "id">,
+      tokenId: string,
+    ): Promise<Project> {
+      const id = generateId("proj");
+      const row = { id, ...data };
+      await db.transaction(async (tx) => {
+        await tx.insert(project).values(row);
+        await tx.insert(personalAccessTokenGrant).values({
+          id: generateId("patgrant"),
+          tokenId,
+          resourceType: "project",
+          resourceId: id,
+          permissionsJson: JSON.stringify(["read", "write", "admin"]),
+        });
+      });
       return { ...row, createdAt: new Date(), updatedAt: new Date() } as Project;
     },
 

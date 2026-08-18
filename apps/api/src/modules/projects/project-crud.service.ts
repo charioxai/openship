@@ -78,6 +78,7 @@ import {
   claimFolderSessionProject,
   getPrincipalFolderSession,
 } from "./folder/session-store";
+import { createProvisionLock } from "../../lib/provision-lock";
 import type {
   TCreateProjectBody,
   TCreateProjectEnvironmentBody,
@@ -756,6 +757,7 @@ async function createProductionProject(
   data: TCreateProjectBody,
   slug: string,
   organizationId: string,
+  scopedTokenId?: string,
 ) {
   // Multi-tenant SaaS: never trust a client-supplied installationId. It binds the
   // project to a GitHub App installation, and the push-webhook fan-out deploys by
@@ -812,9 +814,10 @@ async function createProductionProject(
   });
 
   try {
-    const created = await repos.project.create(
-      buildProductionProjectInput(app.id, data, slug, routing, organizationId),
-    );
+    const projectInput = buildProductionProjectInput(app.id, data, slug, routing, organizationId);
+    const created = scopedTokenId
+      ? await repos.project.createWithScopedPatGrant(projectInput, scopedTokenId)
+      : await repos.project.create(projectInput);
     await persistProjectRouteState(created.id, routing.publicEndpoints);
     await persistMonorepoApps(created.id, data);
     return created;
@@ -1146,6 +1149,30 @@ export async function ensureProject(
   organizationId: string,
   authority?: { principalId: string },
 ) {
+  const desiredSlug = data.slug || slugify(data.name);
+  const lockKeys = new Set<string>();
+  if (data.projectId) {
+    lockKeys.add(`project-shape:id:${data.projectId}`);
+    const current = await repos.project.findById(data.projectId);
+    if (current?.organizationId === organizationId) {
+      lockKeys.add(`project-shape:slug:${organizationId}:${current.slug}`);
+    }
+  }
+  lockKeys.add(`project-shape:slug:${organizationId}:${desiredSlug}`);
+
+  const keys = [...lockKeys].sort();
+  const runLocked = (index: number): Promise<Awaited<ReturnType<typeof ensureProjectUnlocked>>> =>
+    index >= keys.length
+      ? ensureProjectUnlocked(data, organizationId, authority)
+      : createProvisionLock(keys[index]!).run(() => runLocked(index + 1));
+  return runLocked(0);
+}
+
+async function ensureProjectUnlocked(
+  data: EnsureProjectBody,
+  organizationId: string,
+  authority?: { principalId: string },
+) {
   const nameSlug = slugify(data.name);
   const desiredSlug = data.slug || nameSlug;
 
@@ -1401,6 +1428,7 @@ export async function getProject(projectId: string, organizationId: string) {
 export async function createProject(
   data: TCreateProjectBody,
   organizationId: string,
+  scopedTokenId?: string,
 ) {
   const slug = slugify(data.name);
 
@@ -1411,7 +1439,7 @@ export async function createProject(
 
   // installationId is resolved server-side inside createProductionProject, which
   // both creating entry points share — see the comment there.
-  const p = await createProductionProject(data, slug, organizationId);
+  const p = await createProductionProject(data, slug, organizationId, scopedTokenId);
 
   return enrichProject(p);
 }

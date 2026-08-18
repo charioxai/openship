@@ -7,6 +7,7 @@ import { projectInfoToScanResponse } from "../../deployments/prepare.service";
 import {
   createFolderSession,
   acceptRelayUpload,
+  FolderUploadStateError,
   scanFolderSession,
 } from "./folder.service";
 import {
@@ -78,6 +79,9 @@ export async function uploadRelay(c: Context) {
     await acceptRelayUpload(session, body);
     return c.json({ success: true });
   } catch (err) {
+    if (err instanceof FolderUploadStateError) {
+      return c.json({ error: safeErrorMessage(err) }, 409);
+    }
     return c.json({ error: safeErrorMessage(err) }, 500);
   }
 }
