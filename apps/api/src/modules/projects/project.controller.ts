@@ -79,8 +79,15 @@ import {
   listBranches as listGitHubBranches,
 } from "../github/github.service";
 import { getInstallationIdByOrg, getInstallUrl } from "../github/github.auth";
-import { ensureSharedWebhook, findSharedWebhookId } from "./project-git-webhook";
-import { listProjectRouteRows, resolveProjectRouteState } from "../domains/project-route.service";
+import {
+  ensureSharedWebhook,
+  findSharedWebhookId,
+} from "./project-git-webhook";
+import {
+  listProjectRouteRows,
+  resolveProjectRouteState,
+} from "../domains/project-route.service";
+import { folderSessionPrincipal } from "./folder/session-store";
 
 // Track which servers have had Lua scripts deployed this session
 const luaDeployedServers = new Set<string>();
@@ -136,7 +143,13 @@ async function ensureFromBody(c: Context, body: TEnsureProjectBody) {
   }
 
   try {
-    const result = await projectService.ensureProject(body, ctx.organizationId);
+    const result = await projectService.ensureProject(
+      body,
+      ctx.organizationId,
+      {
+        principalId: folderSessionPrincipal(ctx),
+      },
+    );
     audit.recordAsync(auditContextFrom(c, ctx.organizationId, ctx.userId), {
       eventType: result.created ? "project.created" : "project.updated",
       resourceType: "project",

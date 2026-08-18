@@ -92,10 +92,25 @@ describe("collectionProject: the flag's safety precondition", () => {
 });
 
 describe("create-scoped folder staging routes", () => {
-  it("removes only the stale service kind during an explicit project-shape transition", () => {
-    expect(staleServiceKindForProjectShape({ projectType: "services", services: [{ name: "api" }] })).toBe("monorepo");
-    expect(staleServiceKindForProjectShape({ projectType: "monorepo", monorepoApps: [{ name: "web", rootDirectory: "apps/web" }] })).toBe("compose");
-    expect(staleServiceKindForProjectShape({ projectType: "services", services: [] })).toBeNull();
+  it("identifies the stale service kind so in-place shape changes can fail closed", () => {
+    expect(
+      staleServiceKindForProjectShape({
+        projectType: "services",
+        services: [{ name: "api" }],
+      }),
+    ).toBe("monorepo");
+    expect(
+      staleServiceKindForProjectShape({
+        projectType: "monorepo",
+        monorepoApps: [{ name: "web", rootDirectory: "apps/web" }],
+      }),
+    ).toBe("compose");
+    expect(
+      staleServiceKindForProjectShape({
+        projectType: "services",
+        services: [],
+      }),
+    ).toBeNull();
     expect(staleServiceKindForProjectShape({ projectType: "app" })).toBeNull();
   });
 

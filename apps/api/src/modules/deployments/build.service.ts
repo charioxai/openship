@@ -52,7 +52,10 @@ import { resolveSmartRoute } from "./smart-route";
 import { snapshotNeedsGitSource, withoutPinnedArtifacts } from "./pinned-artifacts";
 import { deploymentWorkload, projectToClass, snapshotToClass } from "./deployment-class";
 import { resolveProjectInfo } from "./prepare.service";
-import { getFolderSession } from "../projects/folder/session-store";
+import {
+  folderSessionPrincipal,
+  getPrincipalFolderSession,
+} from "../projects/folder/session-store";
 import { hasMaskedValue, unmaskEnv } from "../../lib/secret-env";
 import { assertValidCustomDomains, customHostnamesOf } from "../../lib/custom-domain-guard";
 import {
@@ -980,7 +983,12 @@ function defaultFreeEndpoint(project: {
   slug: string;
   hasServer: boolean;
   port: number | null;
-}): { domain: string; domainType: "free"; port?: string; targetPath?: string } {
+}): {
+  domain: string;
+  domainType: "free";
+  port?: string;
+  targetPath?: string;
+} {
   return project.hasServer && project.port
     ? { domain: project.slug, domainType: "free", port: String(project.port) }
     : { domain: project.slug, domainType: "free", targetPath: "/" };
@@ -1028,16 +1036,27 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
   // feed the service-mode decision below. The snapshot mutations it drives still
   // happen further down, after target resolution (which the upload mode overrides).
   const uploadSession = input.uploadSessionId
-    ? getFolderSession(input.uploadSessionId)
+    ? getPrincipalFolderSession(
+        input.uploadSessionId,
+        ctx.organizationId,
+        folderSessionPrincipal(ctx),
+      )
     : undefined;
-  if (input.uploadSessionId && (!uploadSession || uploadSession.orgId !== ctx.organizationId)) {
-    throw new AppError("Upload session not found or expired — re-upload the folder.", 400);
+  if (
+    input.uploadSessionId &&
+    (!uploadSession || uploadSession.projectId !== project.id)
+  ) {
+    throw new AppError(
+      "Upload session not found or expired — re-upload the folder.",
+      400,
+    );
   }
 
   // The uploaded folder's compose file is the ONLY description a folder deploy
   // has of its service set, and the scan already parsed it — so adopt those
   // services when the caller didn't forward them itself (the documented
-  // session → scan → ensure → deploy flow has no step that does, so a
+  // session → scan → create → stage-folder → deploy flow has no later
+  // step that does, so a
   // multi-service upload deployed with ZERO service rows and failed with "No
   // services were found for this project"). Narrow on purpose: only for a project
   // with no service rows yet, so an existing services project keeps its own rows

@@ -97,7 +97,12 @@ import {
   putFolderSession,
 } from "../../../src/modules/projects/folder/session-store";
 
-const ctx = { userId: "user-1", organizationId: "org-1" } as any;
+const ctx = {
+  userId: "user-1",
+  organizationId: "org-1",
+  sessionId: "session-user-1",
+  sessionKind: "cookie",
+} as any;
 
 function baseProject(overrides: Record<string, unknown> = {}) {
   return {
@@ -397,7 +402,8 @@ describe("triggerDeployment", () => {
 
 /**
  * Folder-upload deploys (#334): the scan parses the uploaded compose file, but
- * the documented session → scan → ensure → deploy flow has no step that hands
+ * the documented session → scan → create → stage-folder → deploy flow
+ * has no later step that hands
  * those services back — so the deploy must take them off the upload session or
  * the project deploys with zero service rows.
  */
@@ -421,6 +427,8 @@ describe("requestBuildAccess — folder-upload compose services", () => {
       id,
       orgId: "org-1",
       userId: "user-1",
+      principalId: "cookie:session-user-1",
+      projectId: "project-1",
       mode: "api-relay",
       createdAt: Date.now(),
       expiresAt: Date.now() + 60_000,
@@ -448,7 +456,7 @@ describe("requestBuildAccess — folder-upload compose services", () => {
     repos.deployment.createBuildSession.mockResolvedValue(undefined);
     repos.deployment.supersedeReconciling.mockResolvedValue(undefined);
     repos.deployment.supersedePendingDecisions.mockResolvedValue(undefined);
-    // No service rows yet — the state right after projects/ensure created it.
+    // No service rows yet — the state right after stage-folder created it.
     repos.service.listByProject.mockResolvedValue([]);
     repos.service.syncFromCompose.mockResolvedValue([]);
 
@@ -491,6 +499,28 @@ describe("requestBuildAccess — folder-upload compose services", () => {
         composeServices: scannedServices,
       }),
     );
+  });
+
+  it("rejects a same-organization upload owned by another credential", async () => {
+    const uploadSessionId = seedSession({
+      principalId: "cookie:another-session",
+    });
+
+    await expect(
+      requestBuildAccess(ctx, { projectId: "project-1", uploadSessionId }),
+    ).rejects.toThrow("Upload session not found");
+
+    expect(repos.deployment.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a session bound to another project", async () => {
+    const uploadSessionId = seedSession({ projectId: "project-2" });
+
+    await expect(
+      requestBuildAccess(ctx, { projectId: "project-1", uploadSessionId }),
+    ).rejects.toThrow("Upload session not found");
+
+    expect(repos.deployment.create).not.toHaveBeenCalled();
   });
 
   it("prefers the caller's services over the session's", async () => {

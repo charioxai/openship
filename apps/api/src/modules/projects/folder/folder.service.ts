@@ -67,6 +67,7 @@ function sweepExpired(now: number): void {
 export interface CreateFolderSessionInput {
   orgId: string;
   userId: string;
+  principalId: string;
   /** Client-detected stack — picks the workspace image for the cloud path. */
   stack?: string;
   packageManager?: string;
@@ -182,6 +183,7 @@ export async function createFolderSession(
       id,
       orgId: input.orgId,
       userId: input.userId,
+      principalId: input.principalId,
       mode: "oblien-direct",
       createdAt: now,
       expiresAt,
@@ -216,6 +218,7 @@ export async function createFolderSession(
     id,
     orgId: input.orgId,
     userId: input.userId,
+    principalId: input.principalId,
     mode: "api-relay",
     createdAt: now,
     expiresAt,
@@ -295,7 +298,9 @@ async function safeExtractTarGz(archivePath: string, destDir: string): Promise<v
   await execFileAsync(
     "tar",
     ["-xzf", archivePath, "-C", destDir, "--no-same-owner"],
-    { maxBuffer: 16 * 1024 * 1024 },
+    {
+      maxBuffer: 16 * 1024 * 1024,
+    },
   );
 }
 
@@ -313,8 +318,9 @@ async function streamToFile(body: ReadableStream<Uint8Array>, dest: string): Pro
  *
  * Any compose services found are REMEMBERED on the session: they're returned to
  * the client too, but the deploy step must not depend on the client handing them
- * back (the documented session → scan → ensure → deploy flow has no step that
- * does), and by then the uploaded compose file is no longer parsed again.
+ * back (the documented session → scan → create → stage-folder → deploy flow
+ * has no later step that does), and by then the uploaded compose file is no
+ * longer parsed again.
  */
 export async function scanFolderSession(session: FolderSession) {
   const info = await scanSource(session);

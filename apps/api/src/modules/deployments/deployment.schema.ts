@@ -104,7 +104,9 @@ const BuildServiceInput = Type.Object({
  * doesn't gain an index signature.
  */
 export const BuildAccessBody = Type.Object({
-  projectId: Type.String({ description: "Target project id (from projects/ensure). Required." }),
+  projectId: Type.String({
+    description: "Target project id (from POST /projects). Required.",
+  }),
   uploadSessionId: Type.Optional(
     Type.String({ description: "Folder-upload session id — deploys the uploaded source instead of git." }),
   ),

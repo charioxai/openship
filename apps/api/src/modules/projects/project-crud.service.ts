@@ -12,6 +12,7 @@ import {
 } from "@repo/db";
 import {
   slugify,
+  AppError,
   NotFoundError,
   ConflictError,
   ForbiddenError,
@@ -73,7 +74,10 @@ import {
 } from "../../lib/plan-guard";
 import { assertValidCustomDomains, customHostnamesOf } from "../../lib/custom-domain-guard";
 import { hasMaskedValue, unmaskEnv } from "../../lib/secret-env";
-import { getFolderSession } from "./folder/session-store";
+import {
+  claimFolderSessionProject,
+  getPrincipalFolderSession,
+} from "./folder/session-store";
 import type {
   TCreateProjectBody,
   TCreateProjectEnvironmentBody,
@@ -675,8 +679,9 @@ async function persistMonorepoApps(
  * Persist the compose services carried by an ensure request — the counterpart to
  * `persistMonorepoApps` for the OTHER multi-app shape.
  *
- * The folder-upload flow (folder/scan → projects/ensure → deployments/build/access)
- * has no other step that owns the parsed compose: without this, `ensure` created
+ * The folder-upload flow (folder/scan → create project → stage-folder →
+ * deployments/build/access) has no other step that owns the parsed compose:
+ * without this, staging created
  * the project and dropped the scan's `services`, so the first deploy ran the
  * services pipeline against ZERO rows and failed with "No services were found
  * for this project" (#334).
@@ -696,6 +701,7 @@ async function persistComposeServices(
   projectId: string,
   organizationId: string,
   data: EnsureProjectBody,
+  principalId?: string,
 ): Promise<void> {
   if (!data.services?.length) return;
 
@@ -716,8 +722,15 @@ async function persistComposeServices(
     for (const row of await repos.service.listByProject(projectId).catch(() => [])) {
       realEnvByName.set(row.name, (row.environment as Record<string, string> | null) ?? {});
     }
-    const session = data.uploadSessionId ? getFolderSession(data.uploadSessionId) : undefined;
-    if (session && session.orgId === organizationId) {
+    const session =
+      data.uploadSessionId && principalId
+        ? getPrincipalFolderSession(
+            data.uploadSessionId,
+            organizationId,
+            principalId,
+          )
+        : undefined;
+    if (session?.projectId === projectId) {
       for (const svc of session.services ?? []) {
         if (svc.name && svc.environment) realEnvByName.set(svc.name, svc.environment);
       }
@@ -1097,7 +1110,13 @@ async function findProjectByAppSlug(
  */
 export async function assertProjectQuota(organizationId: string): Promise<void> {
   if (!env.CLOUD_MODE) {
-    const { total } = await repos.projectGroup.listByOrganization(organizationId, { page: 1, perPage: 1 });
+    const { total } = await repos.projectGroup.listByOrganization(
+      organizationId,
+      {
+        page: 1,
+        perPage: 1,
+      },
+    );
     if (total >= SYSTEM.PROJECTS.MAX_PER_USER) {
       throw new ValidationError(`Project limit reached (${SYSTEM.PROJECTS.MAX_PER_USER})`);
     }
@@ -1106,7 +1125,13 @@ export async function assertProjectQuota(organizationId: string): Promise<void> 
 
   const planCap = await planProjectLimit(organizationId);
   const cap = planCap ?? env.CLOUD_MAX_PROJECTS_PER_USER;
-  const { total } = await repos.projectGroup.listByOrganization(organizationId, { page: 1, perPage: 1 });
+  const { total } = await repos.projectGroup.listByOrganization(
+    organizationId,
+    {
+      page: 1,
+      perPage: 1,
+    },
+  );
   if (total >= cap) {
     throw new PlanUpgradeRequiredError(
       `Your plan includes ${cap} projects and you're using ${total}. Upgrade to add more.`,
@@ -1119,6 +1144,7 @@ export async function assertProjectQuota(organizationId: string): Promise<void> 
 export async function ensureProject(
   data: EnsureProjectBody,
   organizationId: string,
+  authority?: { principalId: string },
 ) {
   const nameSlug = slugify(data.name);
   const desiredSlug = data.slug || nameSlug;
@@ -1134,6 +1160,47 @@ export async function ensureProject(
   }
   if (!project && desiredSlug !== nameSlug) {
     project = await findProjectByAppSlug(organizationId, desiredSlug, data.gitBranch);
+  }
+
+  // A service-shape change used to hard-delete the obsolete service rows. Those
+  // rows own deployment history through cascading foreign keys, and the delete
+  // happened before the replacement shape was validated or persisted. Refuse
+  // the in-place transition instead: the caller can create a new project while
+  // this project's deployments remain intact and auditable.
+  if (project) {
+    const staleKind = staleServiceKindForProjectShape(data);
+    if (staleKind) {
+      const staleRows = await repos.service.listByProjectKind(
+        project.id,
+        staleKind,
+      );
+      if (staleRows.length > 0) {
+        throw new ConflictError(
+          "Changing an existing project's service shape is not supported; create a new project to preserve deployment history.",
+        );
+      }
+    }
+  }
+
+  if (data.uploadSessionId) {
+    if (!data.projectId || !project || !authority?.principalId) {
+      throw new AppError(
+        "Folder uploads must be staged on an exact created project.",
+        400,
+      );
+    }
+    const claimed = claimFolderSessionProject(
+      data.uploadSessionId,
+      organizationId,
+      authority.principalId,
+      project.id,
+    );
+    if (!claimed) {
+      throw new AppError(
+        "Upload session not found, expired, or already bound.",
+        400,
+      );
+    }
   }
   let created = false;
 
@@ -1253,20 +1320,14 @@ export async function ensureProject(
     await persistMonorepoApps(project.id, data);
   }
 
-  // A folder can be rescanned after its repository shape changes. The incoming
-  // projectType is authoritative for that explicit transition: remove only the
-  // now-obsolete service kind before syncing the new one. Keeping both kinds
-  // makes the services pipeline attempt to deploy stale rows.
-  const staleKind = staleServiceKindForProjectShape(data);
-  if (staleKind === "monorepo") {
-    await repos.service.syncMonorepoApps(project.id, []);
-  } else if (staleKind === "compose") {
-    await repos.service.syncFromCompose(project.id, []);
-  }
-
   // Compose services, for BOTH branches (createProductionProject handles the
   // monorepo shape internally; this one shape is persisted in one place).
-  await persistComposeServices(project.id, organizationId, data);
+  await persistComposeServices(
+    project.id,
+    organizationId,
+    data,
+    authority?.principalId,
+  );
 
   return { success: true, project_id: project.id, created };
 }
@@ -1302,7 +1363,10 @@ export async function listProjects(
   // requirePermission middleware ensures it's set before the controller runs.
   const { rows: projects } = await repos.project.listByOrganization(
     organizationId,
-    { page: 1, perPage: 1000 },
+    {
+      page: 1,
+      perPage: 1000,
+    },
   );
 
   const byGroup = new Map<string, Project[]>();

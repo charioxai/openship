@@ -32,6 +32,9 @@ describe("mcp prompts catalog", () => {
     const text = (res!.messages[0] as { content: { text: string } }).content.text;
     expect(text).toMatch(/out.of.band/i);
     expect(text).toContain("/api/projects/folder/session");
+    expect(text).toContain("POST /api/projects");
+    expect(text).toContain("PATCH /api/projects/:id/stage-folder");
+    expect(text).not.toContain("POST /api/projects/ensure");
     expect(text).toContain("/api/deployments/build/access");
   });
 

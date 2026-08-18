@@ -100,7 +100,7 @@ const PROMPTS: PromptDef[] = [
     name: "deploy-a-folder",
     title: "Deploy a local source folder (upload)",
     description:
-      "The 4-step folder-upload flow. Note step 1b: the raw tarball upload is NOT an MCP tool — you POST the bytes yourself with an HTTP client.",
+      "The 5-step folder-upload flow. Note step 1b: the raw tarball upload is NOT an MCP tool — you POST the bytes yourself with an HTTP client.",
     build: (_args, ref) =>
       [
         "Deploy a local folder that isn't in git. This flow has an out-of-band byte upload — raw binary can't cross JSON-RPC, so you upload the tarball yourself.",
@@ -108,8 +108,9 @@ const PROMPTS: PromptDef[] = [
         `1. Open an upload session: ${ref("POST", "/api/projects/folder/session")}. It returns \`upload\` = { url, absoluteUrl, method, headers, requiresAuth } and a sessionId.`,
         "1b. OUT OF BAND — gzip your folder into a tarball and POST the bytes to `upload.absoluteUrl` (the ready-to-use URL; `upload.url` is the same target relative to your API base) with the returned headers and Content-Type: application/gzip, plus your `Authorization: Bearer <token>` when `upload.requiresAuth` is true. Use a plain HTTP client; there is no MCP tool for this.",
         `2. Detect the uploaded source's stack: ${ref("POST", "/api/projects/folder/scan/:sessionId")} (body may be {}). Returns framework, package manager, install/build/start commands, output dir, port — plus a \`services\` array for a docker-compose folder.`,
-        `3. Create/update the project that carries the build config: ${ref("POST", "/api/projects/ensure")}. Map the scan fields in (framework = the scan's stack id) and set gitProvider:'upload'. If the scan returned \`services\`, pass that array through verbatim AND include \`uploadSessionId\` — env values come back masked ("••••••••"), and the session is what restores the real ones. Returns the project id.`,
-        `4. Deploy: ${ref("POST", "/api/deployments/build/access")} with the projectId (step 3) and uploadSessionId (step 1). Then watch with ${ref("GET", "/api/deployments/:id")} and ${ref("GET", "/api/deployments/:id/logs")}.`,
+        `3. Create the project: ${ref("POST", "/api/projects")}. Set gitProvider:'upload' and map the non-secret scan fields. The returned project id is auto-granted to this create-only credential.`,
+        `4. Bind and stage the upload on that exact project: ${ref("PATCH", "/api/projects/:id/stage-folder")}. Map the scan fields again, pass \`uploadSessionId\`, and pass any scanned \`services\` verbatim so masked environment values are restored from the principal-owned session. A session can bind to only one project.`,
+        `5. Deploy: ${ref("POST", "/api/deployments/build/access")} with the projectId (step 3) and uploadSessionId (step 1). Then watch with ${ref("GET", "/api/deployments/:id")} and ${ref("GET", "/api/deployments/:id/logs")}.`,
       ].join("\n"),
   },
   {

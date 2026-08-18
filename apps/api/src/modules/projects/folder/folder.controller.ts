@@ -4,8 +4,15 @@ import { getRequestContext } from "../../../lib/request-context";
 import { parseRevealKeys, pickRevealed } from "../../../lib/env-reveal";
 import { requestApiPublicUrl } from "../../../lib/public-url";
 import { projectInfoToScanResponse } from "../../deployments/prepare.service";
-import { createFolderSession, acceptRelayUpload, scanFolderSession } from "./folder.service";
-import { getFolderSession } from "./session-store";
+import {
+  createFolderSession,
+  acceptRelayUpload,
+  scanFolderSession,
+} from "./folder.service";
+import {
+  folderSessionPrincipal,
+  getPrincipalFolderSession,
+} from "./session-store";
 
 /**
  * POST /projects/folder/session
@@ -14,7 +21,8 @@ import { getFolderSession } from "./session-store";
  * single-use ticket (self-hosted).
  */
 export async function createSession(c: Context) {
-  const { organizationId, userId } = getRequestContext(c);
+  const ctx = getRequestContext(c);
+  const { organizationId, userId } = ctx;
   const body = await c.req
     .json<{ stack?: string; packageManager?: string; name?: string }>()
     .catch(() => ({}) as { stack?: string; packageManager?: string; name?: string });
@@ -23,6 +31,7 @@ export async function createSession(c: Context) {
     const result = await createFolderSession({
       orgId: organizationId,
       userId,
+      principalId: folderSessionPrincipal(ctx),
       stack: body.stack,
       packageManager: body.packageManager,
       name: body.name,
@@ -40,10 +49,17 @@ export async function createSession(c: Context) {
  * route is excluded from MCP tool generation (see mcp-tools DENY list).
  */
 export async function uploadRelay(c: Context) {
-  const { organizationId } = getRequestContext(c);
+  const ctx = getRequestContext(c);
+  const { organizationId } = ctx;
   const sessionId = c.req.param("sessionId");
-  const session = sessionId ? getFolderSession(sessionId) : undefined;
-  if (!session || session.orgId !== organizationId) {
+  const session = sessionId
+    ? getPrincipalFolderSession(
+        sessionId,
+        organizationId,
+        folderSessionPrincipal(ctx),
+      )
+    : undefined;
+  if (!session) {
     return c.json({ error: "Upload session not found" }, 404);
   }
   if (session.mode !== "api-relay") {
@@ -72,10 +88,17 @@ export async function uploadRelay(c: Context) {
  * shape as scanLocal so the deploy wizard consumes it unchanged.
  */
 export async function scanSession(c: Context) {
-  const { organizationId } = getRequestContext(c);
+  const ctx = getRequestContext(c);
+  const { organizationId } = ctx;
   const sessionId = c.req.param("sessionId");
-  const session = sessionId ? getFolderSession(sessionId) : undefined;
-  if (!session || session.orgId !== organizationId) {
+  const session = sessionId
+    ? getPrincipalFolderSession(
+        sessionId,
+        organizationId,
+        folderSessionPrincipal(ctx),
+      )
+    : undefined;
+  if (!session) {
     return c.json({ error: "Upload session not found" }, 404);
   }
 
@@ -99,7 +122,8 @@ export async function scanSession(c: Context) {
  * shipped the whole stack's secrets to the browser.
  */
 export async function revealSessionEnv(c: Context) {
-  const { organizationId } = getRequestContext(c);
+  const ctx = getRequestContext(c);
+  const { organizationId } = ctx;
   const sessionId = c.req.param("sessionId");
   type RevealBody = { service?: unknown; keys?: unknown };
   const body = await c.req.json<RevealBody>().catch(() => ({}) as RevealBody);
@@ -107,8 +131,14 @@ export async function revealSessionEnv(c: Context) {
   if (!serviceName) return c.json({ error: "service is required" }, 400);
   const keys = parseRevealKeys(body.keys);
 
-  const session = sessionId ? getFolderSession(sessionId) : undefined;
-  if (!session || session.orgId !== organizationId) {
+  const session = sessionId
+    ? getPrincipalFolderSession(
+        sessionId,
+        organizationId,
+        folderSessionPrincipal(ctx),
+      )
+    : undefined;
+  if (!session) {
     return c.json({ error: "Upload session not found" }, 404);
   }
   const match = (session.services ?? []).find((s) => s.name === serviceName);

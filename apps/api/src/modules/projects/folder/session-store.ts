@@ -16,6 +16,7 @@
 import { randomBytes } from "node:crypto";
 // Type-only — keeps this module runtime-dependency-free (see the note above).
 import type { DeployableService } from "../../../lib/deployable-service";
+import type { RequestContext } from "../../../lib/request-context";
 
 export type FolderUploadMode = "oblien-direct" | "api-relay";
 
@@ -23,6 +24,10 @@ export interface FolderSession {
   id: string;
   orgId: string;
   userId: string;
+  /** Exact credential/session principal that opened this upload. */
+  principalId: string;
+  /** Set once, to the exact project created for this upload. */
+  projectId?: string;
   mode: FolderUploadMode;
   createdAt: number;
   expiresAt: number;
@@ -63,6 +68,43 @@ export function getFolderSession(sessionId: string): FolderSession | undefined {
     return undefined;
   }
   return s;
+}
+
+export function folderSessionPrincipal(
+  ctx: Pick<RequestContext, "sessionId" | "sessionKind" | "tokenScope">,
+): string {
+  return ctx.tokenScope?.tokenId
+    ? `pat:${ctx.tokenScope.tokenId}`
+    : `${ctx.sessionKind}:${ctx.sessionId}`;
+}
+
+export function getPrincipalFolderSession(
+  sessionId: string,
+  orgId: string,
+  principalId: string,
+): FolderSession | undefined {
+  const session = getFolderSession(sessionId);
+  if (
+    !session ||
+    session.orgId !== orgId ||
+    session.principalId !== principalId
+  )
+    return undefined;
+  return session;
+}
+
+/** Atomically bind a principal-owned upload session to one project forever. */
+export function claimFolderSessionProject(
+  sessionId: string,
+  orgId: string,
+  principalId: string,
+  projectId: string,
+): FolderSession | undefined {
+  const session = getPrincipalFolderSession(sessionId, orgId, principalId);
+  if (!session || (session.projectId && session.projectId !== projectId))
+    return undefined;
+  session.projectId = projectId;
+  return session;
 }
 
 /**

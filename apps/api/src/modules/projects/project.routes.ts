@@ -103,7 +103,7 @@ r.post(
     body: FolderSessionBody,
     mcp: {
       description:
-        "Folder-upload deploy — STEP 1/4. Opens an upload session for a local source folder and returns `upload` = { url, absoluteUrl, method, headers, requiresAuth }. NEXT, upload the gzipped tarball yourself: POST it to `upload.absoluteUrl` (or resolve the API-relative `upload.url` against your own API base) with the returned headers and Content-Type: application/gzip — and, when `upload.requiresAuth` is true, the SAME Authorization: Bearer token you used to open the session. That byte upload is NOT an MCP tool (raw binary can't cross JSON-RPC) — use an HTTP client. Then call folder/scan. Sequence: session → (out-of-band tarball upload) → folder/scan → projects/ensure → deployments/build/access.",
+        "Folder-upload deploy — STEP 1/5. Opens a principal-owned upload session and returns `upload` = { url, absoluteUrl, method, headers, requiresAuth }. Upload the gzipped tarball with the SAME credential when `upload.requiresAuth` is true, then call folder/scan. Sequence: session → upload → scan → POST projects → PATCH projects/:id/stage-folder → build/access.",
     },
   },
   folder.createSession,
@@ -116,7 +116,7 @@ r.post(
     projectCreate: true,
     mcp: {
       description:
-        "Folder-upload deploy — STEP 2/4. Run AFTER the tarball is uploaded. Detects the uploaded source's framework/build config (stack, packageManager, install/build/start commands, outputDirectory, productionPaths, port) and, for a docker-compose folder, the `services` array. Body may be empty ({}). Feed the result into projects/ensure (STEP 3) — including `services` verbatim when present.",
+        "Folder-upload deploy — STEP 2/5. Run AFTER the tarball is uploaded. Detects build config and optional compose services. Next create the project with POST /projects, then send this scan plus uploadSessionId to PATCH /projects/:id/stage-folder.",
     },
   },
   folder.scanSession,
@@ -159,7 +159,7 @@ r.post(
     body: EnsureProjectBody,
     mcp: {
       description:
-        "Folder-upload deploy — STEP 3/4. Create or update the project that carries the build config — deployments/build/access reads config from the PROJECT ROW, not the upload session, so this must run first. Map the folder/scan fields in (framework = the scan's stack id) and set gitProvider:'upload'. For a docker-compose folder, pass the scan's `services` array through too — that persists the project's service set — AND pass `uploadSessionId` with it, since the scan masks env values (`••••••••`) and that is what restores them. Pass projectId to update an existing project. Returns the project id for STEP 4.",
+        "Create or update a project by stable identity for full-access callers. Folder uploads must instead use POST /projects followed by PATCH /projects/:id/stage-folder so the upload session binds to one exact project.",
     },
   },
   ctrl.ensure,
@@ -178,7 +178,7 @@ r.post(
     body: CreateProjectBody,
     mcp: {
       description:
-        "Create a project from a git or local source (build config baked into the project). For a folder-upload deploy use projects/ensure instead (it accepts the folder/scan config and gitProvider:'upload').",
+        "Create a project from a git or local source. Folder-upload callers create here first, then bind their upload with PATCH /projects/:id/stage-folder.",
     },
   },
   ctrl.create,
@@ -192,7 +192,7 @@ r.patch(
     body: EnsureProjectBody,
     mcp: {
       description:
-        "Stage a folder scan on this exact project after create-only access has auto-granted its id. Restores masked compose environment values from uploadSessionId before deployment.",
+        "Folder-upload STEP 4/5. Atomically bind the principal-owned uploadSessionId to this exact auto-granted project and stage the scan. Restores masked compose environment values before deployment; the session cannot be reused on another project.",
     },
   },
   cloudProjectProxy,

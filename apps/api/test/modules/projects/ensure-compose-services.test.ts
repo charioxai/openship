@@ -2,13 +2,12 @@ import "../mail/_setup-env";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * projects/ensure must persist the compose services it is handed (#334).
+ * Project staging must persist the compose services it is handed (#334).
  *
- * The folder-upload flow is session → scan → ensure → deploy: the scan parses
- * the uploaded docker-compose.yml, and `ensure` is the step that owns the
+ * The folder-upload flow is session → scan → create → stage-folder → deploy:
+ * the scan parses the uploaded docker-compose.yml, and stage-folder owns the
  * project's config. When it dropped the scan's `services`, the first deploy ran
- * the services pipeline against zero rows and failed with "No services were
- * found for this project".
+ * the services pipeline against zero rows.
  */
 const projectRepo = vi.hoisted(() => ({
   findById: vi.fn(),
@@ -28,6 +27,7 @@ const projectGroupRepo = vi.hoisted(() => ({
 
 const serviceRepo = vi.hoisted(() => ({
   listByProject: vi.fn(),
+  listByProjectKind: vi.fn(),
   syncFromCompose: vi.fn(),
   syncMonorepoApps: vi.fn(),
 }));
@@ -102,6 +102,7 @@ describe("ensureProject compose services", () => {
     projectGroupRepo.listByOrganization.mockResolvedValue({ total: 0, rows: [] });
     projectGroupRepo.create.mockResolvedValue({ id: "grp_new" });
     serviceRepo.listByProject.mockResolvedValue([]);
+    serviceRepo.listByProjectKind.mockResolvedValue([]);
     serviceRepo.syncFromCompose.mockResolvedValue([]);
   });
 
@@ -136,8 +137,34 @@ describe("ensureProject compose services", () => {
     );
 
     expect(result.created).toBe(false);
-    expect(serviceRepo.syncMonorepoApps).toHaveBeenCalledWith("proj_1", []);
-    expect(serviceRepo.syncFromCompose).toHaveBeenCalledWith("proj_1", scannedServices);
+    expect(serviceRepo.syncMonorepoApps).not.toHaveBeenCalled();
+    expect(serviceRepo.syncFromCompose).toHaveBeenCalledWith(
+      "proj_1",
+      scannedServices,
+    );
+  });
+
+  it("refuses an in-place shape transition without deleting deployment history", async () => {
+    projectRepo.findById.mockResolvedValue(existingProject);
+    serviceRepo.listByProjectKind.mockResolvedValue([
+      { id: "svc_old", projectId: "proj_1", kind: "monorepo", name: "web" },
+    ]);
+
+    await expect(
+      ensureProject(
+        {
+          projectId: "proj_1",
+          name: "my-stack",
+          projectType: "services",
+          services: scannedServices,
+        } as any,
+        "org_1",
+      ),
+    ).rejects.toThrow("create a new project to preserve deployment history");
+
+    expect(projectRepo.update).not.toHaveBeenCalled();
+    expect(serviceRepo.syncMonorepoApps).not.toHaveBeenCalled();
+    expect(serviceRepo.syncFromCompose).not.toHaveBeenCalled();
   });
 
   it("leaves the service table alone when the request carries no services", async () => {
@@ -176,6 +203,8 @@ describe("ensureProject compose services — masked env", () => {
       id,
       orgId: "org_1",
       userId: "user_1",
+      principalId: "pat:token_1",
+      projectId: "proj_1",
       mode: "api-relay",
       createdAt: Date.now(),
       expiresAt: Date.now() + 60_000,
@@ -196,20 +225,85 @@ describe("ensureProject compose services — masked env", () => {
     projectGroupRepo.listByOrganization.mockResolvedValue({ total: 0, rows: [] });
     projectGroupRepo.create.mockResolvedValue({ id: "grp_new" });
     serviceRepo.listByProject.mockResolvedValue([]);
+    serviceRepo.listByProjectKind.mockResolvedValue([]);
     serviceRepo.syncFromCompose.mockResolvedValue([]);
   });
 
   it("restores masked values from the upload session that captured them", async () => {
     const uploadSessionId = seedScannedSession();
+    projectRepo.findById.mockResolvedValue(existingProject);
 
     await ensureProject(
-      { name: "my-stack", services: maskedServices, uploadSessionId } as any,
+      {
+        projectId: "proj_1",
+        name: "my-stack",
+        services: maskedServices,
+        uploadSessionId,
+      } as any,
       "org_1",
+      { principalId: "pat:token_1" },
     );
 
-    expect(serviceRepo.syncFromCompose).toHaveBeenCalledWith("proj_new", [
+    expect(serviceRepo.syncFromCompose).toHaveBeenCalledWith("proj_1", [
       expect.objectContaining({ environment: { DB_PASSWORD: "s3cret" } }),
     ]);
+
+    // An exact retry is allowed, but the binding cannot move to another project.
+    await expect(
+      ensureProject(
+        {
+          projectId: "proj_1",
+          name: "my-stack",
+          services: maskedServices,
+          uploadSessionId,
+        } as any,
+        "org_1",
+        { principalId: "pat:token_1" },
+      ),
+    ).resolves.toMatchObject({ project_id: "proj_1" });
+  });
+
+  it("rejects a different principal in the same organization", async () => {
+    const uploadSessionId = seedScannedSession();
+    projectRepo.findById.mockResolvedValue(existingProject);
+
+    await expect(
+      ensureProject(
+        {
+          projectId: "proj_1",
+          name: "my-stack",
+          services: maskedServices,
+          uploadSessionId,
+        } as any,
+        "org_1",
+        { principalId: "pat:token_other" },
+      ),
+    ).rejects.toThrow("Upload session not found");
+
+    expect(serviceRepo.syncFromCompose).not.toHaveBeenCalled();
+  });
+
+  it("rejects rebinding the same upload to another project", async () => {
+    const uploadSessionId = seedScannedSession();
+    projectRepo.findById.mockResolvedValue({
+      ...existingProject,
+      id: "proj_2",
+    });
+
+    await expect(
+      ensureProject(
+        {
+          projectId: "proj_2",
+          name: "other-stack",
+          services: maskedServices,
+          uploadSessionId,
+        } as any,
+        "org_1",
+        { principalId: "pat:token_1" },
+      ),
+    ).rejects.toThrow("already bound");
+
+    expect(serviceRepo.syncFromCompose).not.toHaveBeenCalled();
   });
 
   it("restores from the stored row when re-ensuring an existing project", async () => {
@@ -236,29 +330,49 @@ describe("ensureProject compose services — masked env", () => {
     ]);
   });
 
-  it("ignores an upload session belonging to another org", async () => {
+  it("rejects an upload session belonging to another org", async () => {
     const uploadSessionId = seedScannedSession({ orgId: "org_other" });
+    projectRepo.findById.mockResolvedValue(existingProject);
 
-    await ensureProject(
-      { name: "my-stack", services: maskedServices, uploadSessionId } as any,
-      "org_1",
-    );
+    await expect(
+      ensureProject(
+        {
+          projectId: "proj_1",
+          name: "my-stack",
+          services: maskedServices,
+          uploadSessionId,
+        } as any,
+        "org_1",
+        { principalId: "pat:token_1" },
+      ),
+    ).rejects.toThrow("Upload session not found");
 
-    expect(serviceRepo.syncFromCompose).toHaveBeenCalledWith("proj_new", [
-      expect.objectContaining({ environment: {} }),
-    ]);
+    expect(serviceRepo.syncFromCompose).not.toHaveBeenCalled();
   });
 
   it("passes revealed/edited values through untouched", async () => {
     const uploadSessionId = seedScannedSession();
-    const edited = [{ name: "api", image: "ghcr.io/acme/api:1", environment: { DB_PASSWORD: "typed-by-user" } }];
+    projectRepo.findById.mockResolvedValue(existingProject);
+    const edited = [
+      {
+        name: "api",
+        image: "ghcr.io/acme/api:1",
+        environment: { DB_PASSWORD: "typed-by-user" },
+      },
+    ];
 
     await ensureProject(
-      { name: "my-stack", services: edited, uploadSessionId } as any,
+      {
+        projectId: "proj_1",
+        name: "my-stack",
+        services: edited,
+        uploadSessionId,
+      } as any,
       "org_1",
+      { principalId: "pat:token_1" },
     );
 
-    expect(serviceRepo.syncFromCompose).toHaveBeenCalledWith("proj_new", edited);
+    expect(serviceRepo.syncFromCompose).toHaveBeenCalledWith("proj_1", edited);
     // No mask anywhere → no need to read rows back at all.
     expect(serviceRepo.listByProject).not.toHaveBeenCalled();
   });

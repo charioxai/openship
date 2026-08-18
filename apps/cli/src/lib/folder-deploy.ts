@@ -3,8 +3,8 @@
  * dashboard folder-upload flow. When `openship deploy` runs outside a git repo,
  * we package the current folder and drive the same server-side pipeline:
  *
- *   folder/session → (upload the tar.gz) → folder/scan → projects/ensure →
- *   deployments/build/access
+ *   folder/session → (upload the tar.gz) → folder/scan → create project →
+ *   stage that exact project → deployments/build/access
  *
  * Unlike MCP (which can't carry binary over JSON-RPC), the CLI uploads the
  * tarball itself. The upload target is server-owned and opaque: an absolute
@@ -48,7 +48,11 @@ interface ScanRes {
   services?: Array<Record<string, unknown>>;
   error?: string;
 }
-interface EnsureRes {
+interface CreateProjectRes {
+  data?: { id?: string };
+  error?: string;
+}
+interface StageFolderRes {
   success?: boolean;
   project_id?: string;
   error?: string;
@@ -157,33 +161,59 @@ export async function deployFolder(opts: {
   });
   if (scan.success === false) throw new Error(scan.error || "Failed to scan uploaded source");
 
-  // 5. Create (or update) the project from the scan. A start command means a
-  //    long-running server; its absence means a static site served from the edge.
-  step("Creating project");
+  // 5. Create the project first, then bind this principal-owned upload session
+  //    to that exact project. A start command means a long-running server; its
+  //    absence means a static site served from the edge.
   const hasBuild = Boolean(scan.buildCommand);
   const hasServer = Boolean(scan.startCommand);
-  const ensured = await apiRequest<EnsureRes>("/projects/ensure", {
-    method: "POST",
-    body: JSON.stringify({
-      projectId: opts.projectId,
-      name: scan.name || name,
-      gitProvider: "upload",
-      framework: scan.stack,
-      projectType: scan.projectType,
-      packageManager: scan.packageManager,
-      installCommand: scan.installCommand,
-      buildCommand: scan.buildCommand,
-      startCommand: scan.startCommand || undefined,
-      outputDirectory: scan.outputDirectory,
-      rootDirectory: scan.rootDirectory,
-      buildImage: scan.buildImage,
-      hasBuild,
-      hasServer,
-      productionMode: hasServer ? "standalone" : "static",
-      ...(hasServer && scan.port ? { port: scan.port } : {}),
-    }),
-  });
-  if (!ensured.project_id) throw new Error(ensured.error || "Failed to create project");
+  const projectConfig = {
+    name: scan.name || name,
+    gitProvider: "upload",
+    framework: scan.stack,
+    projectType: scan.projectType,
+    packageManager: scan.packageManager,
+    installCommand: scan.installCommand,
+    buildCommand: scan.buildCommand,
+    startCommand: scan.startCommand || undefined,
+    outputDirectory: scan.outputDirectory,
+    rootDirectory: scan.rootDirectory,
+    buildImage: scan.buildImage,
+    hasBuild,
+    hasServer,
+    productionMode: hasServer ? "standalone" : "static",
+    ...(hasServer && scan.port ? { port: scan.port } : {}),
+  };
+
+  let projectId = opts.projectId;
+  if (!projectId) {
+    step("Creating project");
+    const created = await apiRequest<CreateProjectRes>("/projects", {
+      method: "POST",
+      body: JSON.stringify(projectConfig),
+    });
+    projectId = created.data?.id;
+    if (!projectId)
+      throw new Error(created.error || "Failed to create project");
+  }
+
+  step("Staging project source");
+  const staged = await apiRequest<StageFolderRes>(
+    `/projects/${projectId}/stage-folder`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        ...projectConfig,
+        projectId,
+        uploadSessionId: session.sessionId,
+        ...(scan.services && scan.services.length > 0
+          ? { services: scan.services }
+          : {}),
+      }),
+    },
+  );
+  if (!staged.success || staged.project_id !== projectId) {
+    throw new Error(staged.error || "Failed to stage project source");
+  }
 
   // 6. Deploy the uploaded source. Omitting publicEndpoints lets the server
   //    auto-bind a free subdomain from the project slug.
@@ -191,7 +221,7 @@ export async function deployFolder(opts: {
   const dep = await apiRequest<BuildAccessRes>("/deployments/build/access", {
     method: "POST",
     body: JSON.stringify({
-      projectId: ensured.project_id,
+      projectId,
       uploadSessionId: session.sessionId,
       ...(opts.environment ? { environment: opts.environment } : {}),
       // Carry the scanned compose services so a multi-service folder deploys as
@@ -204,5 +234,8 @@ export async function deployFolder(opts: {
   });
   if (!dep.deployment_id) throw new Error(dep.error || "Failed to start deployment");
 
-  return { deploymentId: dep.deployment_id, projectId: dep.project_id };
+  return {
+    deploymentId: dep.deployment_id,
+    projectId: dep.project_id ?? projectId,
+  };
 }
